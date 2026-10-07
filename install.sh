@@ -821,6 +821,12 @@ else
 fi
 mpi_flags() { tr ' ' '\n' <<< "$1" | grep -E "$2" | tr '\n' ' ' ; }
 RUNTIME_CFLAGS=$(mpi_flags "$MPI_COMPILE_INFO" '^-(I|D)')
+# GASNet provides its optimization flags via pkg-config; for MPI, select them here
+if [[ "$GASNET_CODEMODE" == "debug" ]] ; then
+  RUNTIME_CFLAGS="-O0 -g $RUNTIME_CFLAGS"
+else
+  RUNTIME_CFLAGS="-O3 $RUNTIME_CFLAGS"
+fi
 RUNTIME_LDFLAGS=
 RUNTIME_LIBS=$(mpi_flags "$MPI_LINK_INFO" '^-(L|l)')
 APPEND_LDFLAGS+=" $(mpi_flags "$MPI_LINK_INFO" '^-Wl,')"
