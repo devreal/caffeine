@@ -22,6 +22,11 @@
 //   completed at segment boundaries (image control statements).
 // - Gets wait for local completion; atomics are completed at the target.
 // - Accesses to the executing image's own memory use memcpy.
+// - Shared-memory mode: when all images run on a single node, the segment is
+//   created with MPI_Win_allocate_shared instead, and every image maps all
+//   segments (MPI_Win_shared_query). Puts and gets then are direct memory
+//   copies, and atomics (including events, notify and locks) are CPU atomic
+//   instructions on the shared memory. Disable with CAF_MPI_SHM=0.
 // - Teams are MPI communicators created by MPI_Comm_split.
 
 #if CAF_RUNTIME_MPI
@@ -38,6 +43,7 @@
 #include <stdarg.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <sched.h>
 #include <mpi.h>
 #include <ISO_Fortran_binding.h>
 #include "../dlmalloc/dl_malloc_caf.h"
@@ -87,6 +93,12 @@ static MPI_Win seg_win = MPI_WIN_NULL;
 static byte *seg_base;
 static size_t seg_size;
 static intptr_t *seg_bases; // seg_bases[r] == segment base address on initial-team rank r
+
+// Shared-memory mode (see the overview above): when true, peer_seg[r] is the
+// address at which this process maps the segment of initial-team rank r.
+// All atomic accesses then use CPU atomics, never MPI atomics.
+static bool shm_mode = false;
+static byte **peer_seg;
 
 static mspace* non_symmetric_heap;
 static pthread_mutex_t non_symmetric_heap_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -173,6 +185,16 @@ static double getenv_double(const char *key, double dflt) {
   double num = strtod(val, &end);
   if (end == val) caf_fatal("Invalid value for environment variable %s='%s'", key, val);
   return num;
+}
+
+static bool getenv_bool(const char *key, bool dflt) {
+  const char *val = getenv(key);
+  if (!val || !*val) return dflt;
+  switch (val[0]) {
+    case '0': case 'n': case 'N': case 'f': case 'F': return false;
+    case '1': case 'y': case 'Y': case 't': case 'T': return true;
+  }
+  caf_fatal("Invalid value for environment variable %s='%s'", key, val);
 }
 
 // ---------------------------------------------------
@@ -323,7 +345,39 @@ void caf_caffeinate(
   MPI_SAFE(MPI_Info_set(info, "accumulate_ordering", "none"));
   MPI_SAFE(MPI_Info_set(info, "same_disp_unit", "true"));
   void *base = NULL;
-  int rc = MPI_Win_allocate((MPI_Aint)segsz, 1, info, world, &base, &seg_win);
+  int rc = MPI_ERR_OTHER;
+
+  // Use a shared-memory window when all images reside on one node.
+  // The decision must be the same on all images.
+  {
+    int want_shm = getenv_bool("CAF_MPI_SHM", true) && !CAF_DEBUG_DEFER_PUTS;
+    if (want_shm) {
+      MPI_Comm node_comm;
+      int node_size;
+      MPI_SAFE(MPI_Comm_split_type(world, MPI_COMM_TYPE_SHARED, 0, MPI_INFO_NULL, &node_comm));
+      MPI_SAFE(MPI_Comm_size(node_comm, &node_size));
+      MPI_SAFE(MPI_Comm_free(&node_comm));
+      want_shm = (node_size == numprocs);
+    }
+    MPI_SAFE(MPI_Allreduce(MPI_IN_PLACE, &want_shm, 1, MPI_INT, MPI_MIN, world));
+    if (want_shm) {
+      // allow each image's segment to be placed in memory local to that process
+      MPI_SAFE(MPI_Info_set(info, "alloc_shared_noncontig", "true"));
+      rc = MPI_Win_allocate_shared((MPI_Aint)segsz, 1, info, world, &base, &seg_win);
+      int ok = (rc == MPI_SUCCESS);
+      MPI_SAFE(MPI_Allreduce(MPI_IN_PLACE, &ok, 1, MPI_INT, MPI_MIN, world));
+      if (ok) {
+        shm_mode = true;
+      } else {
+        if (rc == MPI_SUCCESS) MPI_SAFE(MPI_Win_free(&seg_win));
+        if (myproc == 0)
+          fprintf(stderr, "Caffeine: WARNING: failed to allocate a shared-memory heap of %zu bytes per image; "
+                          "falling back to MPI RMA\n", segsz);
+      }
+    }
+  }
+  if (!shm_mode)
+    rc = MPI_Win_allocate((MPI_Aint)segsz, 1, info, world, &base, &seg_win);
   MPI_SAFE(MPI_Info_free(&info));
   if (rc != MPI_SUCCESS)
     caf_fatal("Failed to allocate a shared heap segment of %zu bytes. "
@@ -355,6 +409,22 @@ void caf_caffeinate(
 #endif
   intptr_t my_base = (intptr_t)seg_base;
   MPI_SAFE(MPI_Allgather(&my_base, sizeof(intptr_t), MPI_BYTE, seg_bases, sizeof(intptr_t), MPI_BYTE, world));
+
+  if (shm_mode) {
+    peer_seg = malloc(sizeof(byte*) * numprocs);
+    if (!peer_seg) caf_fatal("out of memory allocating segment tables");
+    for (int r = 0; r < numprocs; r++) {
+      MPI_Aint size;
+      int disp_unit;
+      void *ptr;
+      MPI_SAFE(MPI_Win_shared_query(seg_win, r, &size, &disp_unit, &ptr));
+      if ((size_t)size < seg_size)
+        caf_fatal("MPI_Win_shared_query returned a segment of %zu bytes for image %d, expected %zu",
+                  (size_t)size, r + 1, seg_size);
+      peer_seg[r] = ptr;
+    }
+    assert(peer_seg[myproc] == seg_base);
+  }
 
   MPI_SAFE(MPI_Win_lock_all(MPI_MODE_NOCHECK, seg_win));
 
@@ -521,6 +591,13 @@ static inline MPI_Aint to_disp(int rank, intptr_t addr, size_t len) {
   return disp;
 }
 
+// Local address of displacement disp in the segment of rank, for direct
+// load/store access: valid in shared-memory mode, or for the calling image
+static inline void *direct_addr(int rank, MPI_Aint disp) {
+  assert(shm_mode || rank == myproc);
+  return (shm_mode ? peer_seg[rank] : seg_base) + disp;
+}
+
 // _______________________ Dirty target tracking ____________________________
 
 static inline bool target_is_dirty(int rank) {
@@ -594,8 +671,8 @@ void caf_put(int image, intptr_t dest, void* src, size_t size)
   const int rank = image - 1;
   MPI_Aint disp = to_disp(rank, dest, size);
   order_access(rank, disp, disp + (MPI_Aint)size);
-  if (rank == myproc) { // local load/stores must observe the result immediately
-    memcpy((void*)dest, src, size);
+  if (shm_mode || rank == myproc) {
+    memcpy(direct_addr(rank, disp), src, size);
     return;
   }
 #if CAF_DEBUG_DEFER_PUTS
@@ -626,8 +703,8 @@ void caf_get(int image, void* dest, intptr_t src, size_t size)
   const int rank = image - 1;
   MPI_Aint disp = to_disp(rank, src, size);
   order_access(rank, disp, disp + (MPI_Aint)size);
-  if (rank == myproc) {
-    memcpy(dest, (void*)src, size);
+  if (shm_mode || rank == myproc) {
+    memcpy(dest, direct_addr(rank, disp), size);
     return;
   }
   for (size_t off = 0; off < size; off += CAF_MAX_CHUNK) {
@@ -640,6 +717,54 @@ void caf_get(int image, void* dest, intptr_t src, size_t size)
 
 // _______________________ Strided RMA ____________________________
 
+// Compute the lowest and one-past-highest byte offsets touched by a
+// dims-dimensional strided region of element_size-byte blocks.
+// Returns false if the region is empty.
+static bool strided_bounds(int dims, const ptrdiff_t *stride, const size_t *extent,
+                           size_t element_size, ptrdiff_t *lo, ptrdiff_t *hi) {
+  *lo = 0; *hi = (ptrdiff_t)element_size;
+  for (int d = 0; d < dims; d++) {
+    if (extent[d] == 0) return false;
+    ptrdiff_t span = stride[d] * (ptrdiff_t)(extent[d] - 1);
+    if (span < 0) *lo += span; else *hi += span;
+  }
+  return true;
+}
+
+// Copy a strided region with memcpy. Dimension 0 varies fastest.
+static void strided_copy(int dims, byte *dst, const ptrdiff_t *dst_stride,
+                         const byte *src, const ptrdiff_t *src_stride,
+                         size_t element_size, const size_t *extent) {
+  // merge leading dimensions that are contiguous on both sides into the block size
+  while (dims > 0 && dst_stride[0] == (ptrdiff_t)element_size && src_stride[0] == (ptrdiff_t)element_size) {
+    element_size *= extent[0];
+    dst_stride++; src_stride++; extent++; dims--;
+  }
+  if (dims == 0) {
+    memcpy(dst, src, element_size);
+  } else if (dims == 1) {
+    const ptrdiff_t ds = dst_stride[0], ss = src_stride[0];
+    // fixed-size copies of common element sizes compile to single loads/stores
+    #define CAF_STRIDED_LOOP(nbytes) \
+      for (size_t i = 0; i < extent[0]; i++) \
+        memcpy(dst + (ptrdiff_t)i * ds, src + (ptrdiff_t)i * ss, nbytes)
+    switch (element_size) {
+      case 1:  CAF_STRIDED_LOOP(1);  break;
+      case 2:  CAF_STRIDED_LOOP(2);  break;
+      case 4:  CAF_STRIDED_LOOP(4);  break;
+      case 8:  CAF_STRIDED_LOOP(8);  break;
+      case 16: CAF_STRIDED_LOOP(16); break;
+      default: CAF_STRIDED_LOOP(element_size);
+    }
+    #undef CAF_STRIDED_LOOP
+  } else {
+    const int d = dims - 1; // outermost dimension
+    for (size_t i = 0; i < extent[d]; i++)
+      strided_copy(d, dst + (ptrdiff_t)i * dst_stride[d], dst_stride,
+                   src + (ptrdiff_t)i * src_stride[d], src_stride, element_size, extent);
+  }
+}
+
 // Build a datatype describing a dims-dimensional strided region of
 // element_size-byte contiguous blocks. Dimension 0 varies fastest.
 // Returns false if the region is empty.
@@ -648,12 +773,9 @@ static bool make_strided_type(int dims, const ptrdiff_t *stride, const size_t *e
                               size_t element_size, MPI_Datatype *type,
                               ptrdiff_t *lo, ptrdiff_t *hi) {
   if (element_size > INT_MAX) caf_fatal("strided element_size %zu too large", element_size);
-  *lo = 0; *hi = (ptrdiff_t)element_size;
+  if (!strided_bounds(dims, stride, extent, element_size, lo, hi)) return false;
   for (int d = 0; d < dims; d++) {
-    if (extent[d] == 0) return false;
     if (extent[d] > INT_MAX) caf_fatal("strided extent %zu too large", extent[d]);
-    ptrdiff_t span = stride[d] * (ptrdiff_t)(extent[d] - 1);
-    if (span < 0) *lo += span; else *hi += span;
   }
   MPI_Datatype t, nt;
   MPI_SAFE(MPI_Type_contiguous((int)element_size, MPI_BYTE, &t));
@@ -671,13 +793,26 @@ static void strided_rma(bool is_put, int dims, int image_num,
                         intptr_t remote_ptr, const ptrdiff_t* remote_stride,
                         void *current_image_buffer, const ptrdiff_t *current_image_stride,
                         size_t element_size, const size_t *extent) {
+  const int rank = image_num - 1;
+  if (shm_mode) {
+    ptrdiff_t lo, hi;
+    if (!strided_bounds(dims, remote_stride, extent, element_size, &lo, &hi))
+      return; // empty transfer
+    MPI_Aint disp = to_disp(rank, remote_ptr + lo, (size_t)(hi - lo)) - lo;
+    byte *remote = direct_addr(rank, disp);
+    if (is_put)
+      strided_copy(dims, remote, remote_stride, current_image_buffer, current_image_stride, element_size, extent);
+    else
+      strided_copy(dims, current_image_buffer, current_image_stride, remote, remote_stride, element_size, extent);
+    return;
+  }
+
   MPI_Datatype rtype, ltype;
   ptrdiff_t rlo, rhi, llo, lhi;
   if (!make_strided_type(dims, remote_stride, extent, element_size, &rtype, &rlo, &rhi))
     return; // empty transfer
   make_strided_type(dims, current_image_stride, extent, element_size, &ltype, &llo, &lhi);
 
-  const int rank = image_num - 1;
   // validate the full extent of the remote region, then use the region start as displacement
   (void)to_disp(rank, remote_ptr + rlo, (size_t)(rhi - rlo));
   MPI_Aint disp = (MPI_Aint)(remote_ptr - seg_bases[rank]);
@@ -738,6 +873,11 @@ void caf_sync_team( caf_team_t team ) {
 
 static inline int64_t atomic_fetch_op_local(void *addr, int64_t operand, MPI_Op op) {
   int64_t result = 0;
+  if (shm_mode) {
+    assert(op == MPI_NO_OP || op == MPI_SUM);
+    if (op == MPI_NO_OP) return __atomic_load_n((int64_t*)addr, __ATOMIC_ACQUIRE);
+    return __atomic_fetch_add((int64_t*)addr, operand, __ATOMIC_SEQ_CST);
+  }
   MPI_Aint disp = to_disp(myproc, (intptr_t)addr, sizeof(int64_t));
   order_access(myproc, disp, disp + (MPI_Aint)sizeof(int64_t));
   MPI_SAFE(MPI_Fetch_and_op(&operand, &result, MPI_INT64_T, myproc, disp, op, seg_win));
@@ -748,6 +888,15 @@ static inline int64_t atomic_fetch_op_local(void *addr, int64_t operand, MPI_Op 
 void caf_event_post(int image, intptr_t event_var_ptr, int segment_boundary, int release_fence) {
   assert(event_var_ptr);
   const int rank = image - 1;
+
+  if (shm_mode) {
+    if (segment_boundary) caf_segment_release();
+    MPI_Aint disp = to_disp(rank, event_var_ptr, sizeof(int64_t));
+    // a sequentially consistent RMW also orders all earlier stores of this image,
+    // such as the data of a put with NOTIFY=
+    __atomic_fetch_add((int64_t*)direct_addr(rank, disp), 1, __ATOMIC_SEQ_CST);
+    return;
+  }
 
   if (segment_boundary) {
     caf_segment_release();
@@ -789,8 +938,11 @@ void caf_event_wait(void *event_var_ptr, int64_t threshold,
 
   int64_t cnt = 0;
   while (1) {
+    unsigned spins = 0;
     while (caf_event_query(event_var_ptr, &cnt), cnt < threshold) {
-      // caf_event_query enters the MPI library, which provides progress
+      // without shared memory, caf_event_query enters the MPI library, which provides progress;
+      // yield occasionally in case images outnumber cores
+      if (++spins % 1024 == 0) sched_yield();
     }
     if (maybe_concurrent) pthread_mutex_lock(&notify_wait_lock);
     caf_event_query(event_var_ptr, &cnt);
@@ -814,8 +966,33 @@ void caf_atomic_int(int opcode, int image, void* addr, int64_t *result, int64_t 
   assert(addr);
   const int rank = image - 1;
   MPI_Aint disp = to_disp(rank, (intptr_t)addr, sizeof(int64_t));
-  order_access(rank, disp, disp + (MPI_Aint)sizeof(int64_t));
 
+  if (shm_mode) {
+    int64_t *p = direct_addr(rank, disp);
+    switch (opcode) {
+      case CAF_OP_GET:  *result = __atomic_load_n(p, __ATOMIC_SEQ_CST); break;
+      case CAF_OP_SET:  __atomic_store_n(p, op1, __ATOMIC_SEQ_CST); break;
+      case CAF_OP_ADD:  __atomic_fetch_add(p, op1, __ATOMIC_SEQ_CST); break;
+      case CAF_OP_AND:  __atomic_fetch_and(p, op1, __ATOMIC_SEQ_CST); break;
+      case CAF_OP_OR:   __atomic_fetch_or(p, op1, __ATOMIC_SEQ_CST); break;
+      case CAF_OP_XOR:  __atomic_fetch_xor(p, op1, __ATOMIC_SEQ_CST); break;
+      case CAF_OP_FADD: *result = __atomic_fetch_add(p, op1, __ATOMIC_SEQ_CST); break;
+      case CAF_OP_FAND: *result = __atomic_fetch_and(p, op1, __ATOMIC_SEQ_CST); break;
+      case CAF_OP_FOR:  *result = __atomic_fetch_or(p, op1, __ATOMIC_SEQ_CST); break;
+      case CAF_OP_FXOR: *result = __atomic_fetch_xor(p, op1, __ATOMIC_SEQ_CST); break;
+      case CAF_OP_FCAS: { // op1 = compare, op2 = new value; result = old value
+        int64_t expected = op1;
+        __atomic_compare_exchange_n(p, &expected, op2, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+        *result = expected;
+        break;
+      }
+      default:
+        caf_fatal("caf_atomic_int: invalid opcode %d", opcode);
+    }
+    return;
+  }
+
+  order_access(rank, disp, disp + (MPI_Aint)sizeof(int64_t));
   switch (opcode) {
     case CAF_OP_GET:
       MPI_SAFE(MPI_Fetch_and_op(NULL, result, MPI_INT64_T, rank, disp, MPI_NO_OP, seg_win));

@@ -160,6 +160,11 @@ Implementation notes for the MPI runtime (`src/caffeine/caffeine_mpi.c`):
   * Image control statements complete all outstanding puts.
   * Building with `CFLAGS=-DCAF_DEBUG_DEFER_PUTS=1` emulates the weakest completion order MPI
     permits, for testing this logic.
+* **Shared-memory mode.** When all images run on a single node, the heap window is created with
+  `MPI_Win_allocate_shared` and each image maps every other image's segment.
+  * Coarray accesses become direct memory copies.
+  * Atomics, events, notify and locks use CPU atomic instructions.
+  * Set `CAF_MPI_SHM=0` to use MPI RMA instead.
 * **Teams** are MPI communicators.
 * **Stopped images** are not reported, and **failed images** are not detected.
 
