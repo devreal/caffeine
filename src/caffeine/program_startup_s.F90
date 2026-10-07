@@ -23,13 +23,13 @@ contains
           initial_team%heap_mspace, &
           initial_team%heap_start, &
           initial_team%heap_size, &
-          initial_team%gex_team)
+          initial_team%runtime_team)
        call assert_init()
        current_team%info => initial_team
        nullify(initial_team%parent_team)
        initial_team%team_number = -1
-       initial_team%this_image = caf_this_image(initial_team%gex_team)
-       initial_team%num_images = caf_num_images(initial_team%gex_team)
+       initial_team%this_image = caf_this_image(initial_team%runtime_team)
+       initial_team%num_images = caf_num_images(initial_team%runtime_team)
        non_symmetric_heap_size = total_heap_size - initial_team%heap_size
 
        prif_init_called_previously = .true.

@@ -49,7 +49,7 @@ contains
         int(product(shape(a)), c_size_t), &
         funptr, &
         cdata, &
-        current_team%info%gex_team)
+        current_team%info%runtime_team)
   end subroutine
 
   module subroutine prif_co_reduce_cptr(a_ptr, element_size, element_count, operation_wrapper, cdata, result_image, stat, errmsg, errmsg_alloc)
@@ -77,7 +77,7 @@ contains
         element_count, element_size, &
         funptr, &
         cdata, &
-        current_team%info%gex_team)
+        current_team%info%runtime_team)
   end subroutine
 
 

@@ -129,6 +129,40 @@ The `install.sh` recognizes a number of command-line options and environment var
 customize behavior for your system. See the output of `./install.sh --help` for full documentation,
 including options for how to build for a distributed-memory platform or with thread-safety.
 
+### Choosing the communication runtime
+
+Caffeine provides two interchangeable communication runtimes, selected at build time:
+
+* `./install.sh --runtime=gasnet` (the default) uses [GASNet-EX]. The `--network` option
+  selects the GASNet conduit, and the library is installed as
+  `libcaffeine-<network>-<threadmode>.a`.
+* `./install.sh --runtime=mpi` uses MPI one-sided communication (RMA) and MPI collectives
+  from an existing MPI library. No GASNet build is involved. The library is installed as
+  `libcaffeine-mpirt.a`, with pkg-config package `caffeine-mpirt`.
+
+In both cases `libcaffeine.a` and `caffeine.pc` refer to the most recent installation.
+
+For the MPI runtime, `install.sh` queries compile and link flags from the MPI C compiler
+wrapper (`$MPICC`, default `mpicc`; Open MPI and MPICH-derived wrappers are supported). The
+C code itself is compiled with `$CC`, which must match `$FC`. Programs run under the MPI
+launcher (`$MPIEXEC`, default `mpiexec`), for example
+`env CAF_IMAGES=4 ./run-fpm.sh test`. The MPI library must provide the `MPI_WIN_UNIFIED`
+memory model. The MPI runtime does not support `--enable-threads`.
+
+Implementation notes for the MPI runtime (`src/caffeine/caffeine_mpi.c`):
+
+* **Memory.** Each image's shared heap is one `MPI_Win_allocate` window over the initial team,
+  accessed in a passive-target epoch held for the life of the program.
+* **Puts** wait only for source completion. The runtime tracks which targets, and which byte
+  ranges on them, have puts that are not yet complete.
+  * A later access by the same image that overlaps an incomplete range on the same target
+    completes it first, which keeps the image's own accesses in program order.
+  * Image control statements complete all outstanding puts.
+  * Building with `CFLAGS=-DCAF_DEBUG_DEFER_PUTS=1` emulates the weakest completion order MPI
+    permits, for testing this logic.
+* **Teams** are MPI communicators.
+* **Stopped images** are not reported, and **failed images** are not detected.
+
 
 Example Usage
 -------------

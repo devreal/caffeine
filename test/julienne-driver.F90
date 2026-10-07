@@ -23,9 +23,11 @@ program test_suite_driver
   use prif_threaded_test_m, only : prif_threaded_test_t 
   use prif_rma_test_m, only : prif_rma_test_t   
   use prif_strided_test_m, only : prif_strided_test_t
+  use prif_rma_ordering_test_m, only : prif_rma_ordering_test_t
   use prif_event_test_m, only : prif_event_test_t 
   use prif_image_queries_test_m, only : prif_image_queries_test_t
   use prif_atomic_test_m, only : prif_atomic_test_t
+  use prif_lock_test_m, only : prif_lock_test_t
   use prif_error_stop_test_m, only : prif_error_stop_test_t
   use prif_stop_test_m, only : prif_stop_test_t  
   implicit none
@@ -56,10 +58,12 @@ program test_suite_driver
     ,test_fixture_t( prif_image_index_test_t() ) &
     ,test_fixture_t( prif_rma_test_t() ) &
     ,test_fixture_t( prif_strided_test_t() ) &
+    ,test_fixture_t( prif_rma_ordering_test_t() ) &
 
     ! synchronization and data race tests
     ,test_fixture_t( prif_event_test_t() ) &
     ,test_fixture_t( prif_atomic_test_t() ) &
+    ,test_fixture_t( prif_lock_test_t() ) &
     ,test_fixture_t( prif_sync_images_test_t() ) & ! internally uses coarrays and events
 
     ! complicated multi-feature tests

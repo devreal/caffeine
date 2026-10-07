@@ -61,7 +61,7 @@ contains
           a, &
           optional_value(result_image), &
           int(product(shape(a)), c_size_t), &
-          current_team%info%gex_team)
+          current_team%info%runtime_team)
   end subroutine
 
   module procedure prif_co_max_character

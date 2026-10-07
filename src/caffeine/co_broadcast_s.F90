@@ -24,13 +24,13 @@ contains
     character(len=:), intent(inout), allocatable, optional :: errmsg_alloc
 
     if (present(stat)) stat=0
-    call caf_co_broadcast(a, source_image, product(shape(a)), current_team%info%gex_team)
+    call caf_co_broadcast(a, source_image, product(shape(a)), current_team%info%runtime_team)
   end subroutine
 
   module procedure prif_co_broadcast_cptr
     call_assert(prif_init_called_previously)
     call_assert(source_image >= 1 .and. source_image <= current_team%info%num_images)
     if (present(stat)) stat=0
-    call caf_co_broadcast_cptr(a_ptr, source_image, size_in_bytes, current_team%info%gex_team)
+    call caf_co_broadcast_cptr(a_ptr, source_image, size_in_bytes, current_team%info%runtime_team)
   end procedure
 end submodule co_broadcast_s

@@ -2,6 +2,7 @@
 ! Terms of use are as specified in LICENSE.txt
 
 #include "assert_macros.h"
+#include "caffeine-internal.h"
 
 submodule(prif) prif_private_s
   use assert_m
@@ -28,6 +29,10 @@ submodule(prif) prif_private_s
   type(prif_team_type) :: current_team
   integer(c_intptr_t) :: total_heap_size, non_symmetric_heap_size
   logical, save :: prif_init_called_previously = .false.
+
+  ! Return codes of caf_lock_acquire and caf_lock_release
+  integer(c_int), parameter :: CAF_LOCK_ACQUIRED = 0, CAF_LOCK_BUSY = 1, CAF_LOCK_HELD_BY_ME = 2
+  integer(c_int), parameter :: CAF_UNLOCK_OK = 0, CAF_UNLOCK_NOT_LOCKED = 1, CAF_UNLOCK_OTHER_OWNER = 2
 
   interface
 
@@ -58,6 +63,14 @@ submodule(prif) prif_private_s
       integer(c_int), value :: exit_code
     end subroutine
 
+    subroutine caf_abort(exit_code) bind(C)
+      !! void caf_abort(int exit_code)
+      !! Terminates all images (error termination)
+      import c_int
+      implicit none
+      integer(c_int), value :: exit_code
+    end subroutine
+
     subroutine caf_fail_image() bind(C)
       !! void caf_fail_image();
       implicit none
@@ -71,36 +84,36 @@ submodule(prif) prif_private_s
     end subroutine
     ! _________________ Image enumeration ____________________
 
-    function caf_this_image(gex_team) bind(C)
-      !! int caf_this_image(gex_TM_t gex_team);
+    function caf_this_image(runtime_team) bind(C)
+      !! int caf_this_image(caf_team_t runtime_team);
       import c_ptr, c_int
       implicit none
-      type(c_ptr), value :: gex_team
+      type(c_ptr), value :: runtime_team
       integer(c_int) caf_this_image
     end function
 
-    pure function caf_num_images(gex_team) bind(C)
-      !! int caf_num_images(gex_TM_t gex_team);
+    pure function caf_num_images(runtime_team) bind(C)
+      !! int caf_num_images(caf_team_t runtime_team);
       import c_ptr, c_int
       implicit none
-      type(c_ptr), value :: gex_team
+      type(c_ptr), value :: runtime_team
       integer(c_int) caf_num_images
     end function
 
-    function caf_image_to_initial(gex_team, image_num) bind(C)
-      !! int caf_image_to_initial(gex_TM_t tm, int image_num)
+    function caf_image_to_initial(runtime_team, image_num) bind(C)
+      !! int caf_image_to_initial(caf_team_t tm, int image_num)
       import c_ptr, c_int
       implicit none
-      type(c_ptr), value :: gex_team
+      type(c_ptr), value :: runtime_team
       integer(c_int), value :: image_num
       integer(c_int) caf_image_to_initial
     end function
 
-    function caf_image_from_initial(gex_team, image_num) bind(C)
-      !! int caf_image_from_initial(gex_TM_t tm, int image_num)
+    function caf_image_from_initial(runtime_team, image_num) bind(C)
+      !! int caf_image_from_initial(caf_team_t tm, int image_num)
       import c_ptr, c_int
       implicit none
-      type(c_ptr), value :: gex_team
+      type(c_ptr), value :: runtime_team
       integer(c_int), value :: image_num
       integer(c_int) caf_image_from_initial
     end function
@@ -231,7 +244,7 @@ submodule(prif) prif_private_s
     end subroutine
 
     subroutine caf_sync_team(team) bind(C)
-      !! void caf_sync_team(gex_TM_t team);
+      !! void caf_sync_team(caf_team_t team);
        import c_ptr
        implicit none
        type(c_ptr), value :: team
@@ -294,7 +307,7 @@ submodule(prif) prif_private_s
     ! ______________ Collective Subroutines __________________
 
      subroutine caf_co_broadcast(a, source_image, Nelem, team) bind(C)
-       !! void c_co_broadcast(CFI_cdesc_t * a_desc, int source_image, int num_elements, gex_TM_t team);
+       !! void c_co_broadcast(CFI_cdesc_t * a_desc, int source_image, int num_elements, caf_team_t team);
        import c_int, c_ptr
        implicit none
        type(*) a(..)
@@ -303,7 +316,7 @@ submodule(prif) prif_private_s
      end subroutine
 
      subroutine caf_co_broadcast_cptr(a_ptr, source_image, nbytes, team) bind(C)
-       !! void caf_co_broadcast_cptr(void *a_ptr, int source_image, size_t nbytes, gex_TM_t team)
+       !! void caf_co_broadcast_cptr(void *a_ptr, int source_image, size_t nbytes, caf_team_t team)
        import c_int, c_ptr, c_size_t
        implicit none
        type(c_ptr), value :: a_ptr
@@ -313,7 +326,7 @@ submodule(prif) prif_private_s
      end subroutine
 
      subroutine caf_co_reduce(a, result_image, num_elements, op_wrapper, client_data, team) bind(C)
-       !! void caf_co_reduce(CFI_cdesc_t* a_desc, int result_image, size_t num_elements, gex_Coll_ReduceFn_t op_wrapper, void* client_data, gex_TM_t team)
+       !! void caf_co_reduce(CFI_cdesc_t* a_desc, int result_image, size_t num_elements, caf_reduce_fn_t op_wrapper, void* client_data, caf_team_t team)
        import c_int, c_ptr, c_size_t, c_funptr
        implicit none
        type(*) a(..)
@@ -325,7 +338,7 @@ submodule(prif) prif_private_s
      end subroutine
 
      subroutine caf_co_reduce_cptr(a_ptr, result_image, num_elements, element_size, op_wrapper, client_data, team) bind(C)
-       !! void caf_co_reduce_cptr(void *a_ptr, int result_image, size_t num_elements, size_t element_size, gex_Coll_ReduceFn_t op_wrapper, void* client_data, gex_TM_t team)
+       !! void caf_co_reduce_cptr(void *a_ptr, int result_image, size_t num_elements, size_t element_size, caf_reduce_fn_t op_wrapper, void* client_data, caf_team_t team)
        import c_int, c_ptr, c_size_t, c_funptr
        implicit none
        type(c_ptr), value :: a_ptr
@@ -338,7 +351,7 @@ submodule(prif) prif_private_s
      end subroutine
 
      subroutine caf_co_sum(a, result_image, num_elements, team) bind(C)
-       !! void c_co_sum(CFI_cdesc_t* a_desc, int result_image, size_t num_elements, gex_TM_t team);
+       !! void c_co_sum(CFI_cdesc_t* a_desc, int result_image, size_t num_elements, caf_team_t team);
        import c_int, c_ptr, c_size_t
        implicit none
        type(*) a(..)
@@ -348,7 +361,7 @@ submodule(prif) prif_private_s
      end subroutine
 
      subroutine caf_co_min(a, result_image, num_elements, team) bind(C)
-       !! void c_co_min(CFI_cdesc_t* a_desc, int result_image, size_t num_elements, gex_TM_t team);
+       !! void c_co_min(CFI_cdesc_t* a_desc, int result_image, size_t num_elements, caf_team_t team);
        import c_int, c_ptr, c_size_t
        implicit none
        type(*) a(..)
@@ -358,7 +371,7 @@ submodule(prif) prif_private_s
      end subroutine
 
      subroutine caf_co_max(a, result_image, num_elements, team) bind(C)
-       !! void c_co_max(CFI_cdesc_t* a_desc, int result_image, size_t num_elements, gex_TM_t team);
+       !! void c_co_max(CFI_cdesc_t* a_desc, int result_image, size_t num_elements, caf_team_t team);
        import c_int, c_ptr, c_size_t
        implicit none
        type(*) a(..)
@@ -368,7 +381,7 @@ submodule(prif) prif_private_s
      end subroutine
 
      subroutine caf_form_team(current_team, new_team, team_number, new_index) bind(C)
-      !! void caf_form_team(gex_TM_t* current_team, gex_TM_t* new_team, int64_t team_number, int new_index);
+      !! void caf_form_team(caf_team_t* current_team, caf_team_t* new_team, int64_t team_number, int new_index);
       import c_ptr, c_int, c_int64_t
       type(c_ptr), intent(in), value :: current_team
       type(c_ptr), intent(out) :: new_team
@@ -594,7 +607,7 @@ contains
     end if
 
     associate(info => team%info, ch_info => team%info%child_heap_info)
-      call assert_always(c_associated(info%gex_team), "invalid gex_team in team descriptor")
+      call assert_always(c_associated(info%runtime_team), "invalid runtime_team in team descriptor")
 
       if (associated(team%info, initial_team)) then ! initial team
         call assert_always(info%team_number == -1, "invalid team_number in initial team descriptor")
@@ -604,8 +617,8 @@ contains
         call assert_always(associated(info%parent_team), "invalid parent_team in team descriptor")
       end if
 
-      call assert_always(info%this_image == caf_this_image(info%gex_team), "invalid this_image in team descriptor")
-      call assert_always(info%num_images == caf_num_images(info%gex_team), "invalid num_images in team descriptor")
+      call assert_always(info%this_image == caf_this_image(info%runtime_team), "invalid this_image in team descriptor")
+      call assert_always(info%num_images == caf_num_images(info%runtime_team), "invalid num_images in team descriptor")
 
       ! determine activity of this team (is it the current team or an ancestor of current)
       if (present(known_active)) then 
@@ -668,6 +681,55 @@ contains
     end associate
 
     result_ = .true.
+  end function
+
+  ! Locks are implemented with remote atomics on a 64-bit word that holds
+  ! the initial-team image number of the owner, or 0 when unlocked.
+
+  ! Acquire the lock at lock_var_ptr on the given image (relative to the initial team),
+  ! waiting until it is available unless try_only. Returns one of CAF_LOCK_*.
+  function caf_lock_acquire(image, lock_var_ptr, try_only) result(rc)
+    integer(c_int), intent(in) :: image
+    integer(c_intptr_t), intent(in) :: lock_var_ptr
+    logical, intent(in) :: try_only
+    integer(c_int) :: rc
+    integer(PRIF_ATOMIC_INT_KIND) :: me, owner
+
+    me = initial_team%this_image
+    call caf_sync_memory ! release: end the current segment
+    do
+      call caf_atomic_int(CAF_OP_FCAS, image, lock_var_ptr, owner, 0_PRIF_ATOMIC_INT_KIND, me)
+      if (owner == 0) exit
+      if (owner == me) then
+        rc = CAF_LOCK_HELD_BY_ME
+        return
+      end if
+      if (try_only) then
+        rc = CAF_LOCK_BUSY
+        return
+      end if
+    end do
+    call caf_sync_memory ! acquire: begin a new segment
+    rc = CAF_LOCK_ACQUIRED
+  end function
+
+  ! Release the lock at lock_var_ptr on the given image. Returns one of CAF_UNLOCK_*.
+  function caf_lock_release(image, lock_var_ptr) result(rc)
+    integer(c_int), intent(in) :: image
+    integer(c_intptr_t), intent(in) :: lock_var_ptr
+    integer(c_int) :: rc
+    integer(PRIF_ATOMIC_INT_KIND) :: me, owner
+
+    me = initial_team%this_image
+    call caf_sync_memory ! release: complete all accesses of the segment
+    call caf_atomic_int(CAF_OP_FCAS, image, lock_var_ptr, owner, me, 0_PRIF_ATOMIC_INT_KIND)
+    if (owner == me) then
+      rc = CAF_UNLOCK_OK
+    else if (owner == 0) then
+      rc = CAF_UNLOCK_NOT_LOCKED
+    else
+      rc = CAF_UNLOCK_OTHER_OWNER
+    end if
   end function
 
   subroutine caf_establish_child_heap

@@ -23,6 +23,9 @@ For more details about the implementation of the various PRIF features, please s
 - [Collectives](#Collectives)
 - [Atomic Memory Operations](#Atomic-Memory-Operations)
 
+All features listed here are provided by both communication runtimes
+(GASNet-EX and MPI, see `./install.sh --runtime`), unless noted otherwise.
+
 The priorites for feature implementation and addressing known defects are communicated by
 the labels in the Caffeine [issue tracker](https://github.com/BerkeleyLab/caffeine/issues).
 
@@ -135,28 +138,22 @@ selected constant values from `ISO_FORTRAN_ENV` of the hosting compiler.
 ---
 
 ## Locks and Unlocks
-### Support = no
 
-<!---
 | Procedure | Status | Notes |
 |-----------|--------|-------|
-| `prif_lock`            | no  |  |
-| `prif_lock_indirect`   | no  |  |
-| `prif_unlock`          | no  |  |
-| `prif_unlock_indirect` | no  |  |
--->
+| `prif_lock`            | **YES** | implemented with remote compare-and-swap |
+| `prif_lock_indirect`   | **YES** |  |
+| `prif_unlock`          | **YES** |  |
+| `prif_unlock_indirect` | **YES** |  |
 
 ---
 
 ## Critical
-### Support = no
 
-<!---
 | Procedure | Status | Notes |
 |-----------|--------|-------|
-| `prif_critical`     | no  |  |
-| `prif_end_critical` | no  |  |
--->
+| `prif_critical`     | **YES** | implemented as a lock on image 1 of the initial team |
+| `prif_end_critical` | **YES** |  |
 
 ---
 

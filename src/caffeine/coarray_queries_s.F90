@@ -179,7 +179,7 @@ contains
     end associate
 
     call_assert(image_index .le. team%info%num_images)
-    initial_team_index = caf_image_to_initial(team%info%gex_team, image_index)
+    initial_team_index = caf_image_to_initial(team%info%runtime_team, image_index)
     call_assert(initial_team_index .ge. 1 .and. initial_team_index .le. initial_team%num_images)
   end subroutine
 

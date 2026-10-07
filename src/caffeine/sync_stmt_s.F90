@@ -18,13 +18,13 @@ contains
 
   module procedure prif_sync_all
     call_assert(team_check(current_team))
-    call caf_sync_team(current_team%info%gex_team)
+    call caf_sync_team(current_team%info%runtime_team)
     if (present(stat)) stat = 0
   end procedure
 
   module procedure prif_sync_team
     call_assert(team_check(team))
-    call caf_sync_team(team%info%gex_team)
+    call caf_sync_team(team%info%runtime_team)
     if (present(stat)) stat = 0
   end procedure
 
@@ -102,7 +102,7 @@ contains
       else
         img = i
       endif
-      img = caf_image_to_initial( current_team%info%gex_team, img )
+      img = caf_image_to_initial( current_team%info%runtime_team, img )
       call base_pointer(si_coarray_handle, img, evt_ptr)
       evt_ptr = evt_ptr + sizeof_event * (initial_team%this_image - 1)
       call caf_event_post(img, evt_ptr, &
@@ -117,7 +117,7 @@ contains
       else
         img = i
       endif
-      img = caf_image_to_initial( current_team%info%gex_team, img )
+      img = caf_image_to_initial( current_team%info%runtime_team, img )
       call caf_event_wait(c_loc(si_evt(img)), 1_c_int64_t, &
                           segment_boundary=0, &
                           acquire_fence=merge(1,0,i==u), &

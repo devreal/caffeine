@@ -137,14 +137,12 @@ module prif
 
   type, public :: prif_lock_type
     private
-    ! TODO: actual implementation
-    integer :: unimplemented_feature_placeholder = 0
+    integer(c_int64_t) :: owner = 0 ! initial-team image number of the owner, or 0 if unlocked
   end type
 
   type, public :: prif_critical_type
     private
-    ! TODO: actual implementation
-    integer :: unimplemented_feature_placeholder = 0
+    integer(c_int64_t) :: owner = 0 ! initial-team image number of the owner, or 0 if unlocked
   end type
 
   type, public :: prif_notify_type
@@ -1234,7 +1232,7 @@ module prif
   end type
 
   type, private :: prif_team_descriptor
-    type(c_ptr) :: gex_team
+    type(c_ptr) :: runtime_team
     type(c_ptr) :: heap_mspace
     integer(c_intptr_t) :: heap_start
     integer(c_size_t) :: heap_size

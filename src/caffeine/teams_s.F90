@@ -106,13 +106,13 @@ contains
 ! because Fortran lacks a destroy team operation. We consider this to represent
 ! a defect in the Fortran design of teams.
 ! As such, team-specific state such as these data structures and the corresponding 
-! team-related data structures in GASNet can never be reclaimed.
+! team-related data structures in the communication runtime can never be reclaimed.
       allocate(team%info)
       team%info%parent_team => current_team%info
-      call caf_form_team(current_team%info%gex_team, team%info%gex_team, team_number, new_index_)
+      call caf_form_team(current_team%info%runtime_team, team%info%runtime_team, team_number, new_index_)
       team%info%team_number = team_number
-      team%info%this_image = caf_this_image(team%info%gex_team)
-      team%info%num_images = caf_num_images(team%info%gex_team)
+      team%info%this_image = caf_this_image(team%info%runtime_team)
+      team%info%num_images = caf_num_images(team%info%runtime_team)
     end block
 
     call_assert(team_check(team))

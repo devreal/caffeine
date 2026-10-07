@@ -1,6 +1,10 @@
 // Copyright (c), The Regents of the University of California
 // Terms of use are as specified in LICENSE.txt
 
+// GASNet-EX communication runtime for Caffeine (the default).
+// The MPI runtime, selected with -DCAF_RUNTIME_MPI=1, lives in caffeine_mpi.c.
+#if !CAF_RUNTIME_MPI
+
 #include <stdint.h>
 #include <stdio.h>
 #include <stdbool.h>
@@ -203,6 +207,11 @@ void caf_acquire_exit_lock() {
 }
 
 void caf_decaffeinate(int exit_code) {
+  gasnet_exit(exit_code);
+}
+
+// Error termination: terminate all images
+void caf_abort(int exit_code) {
   gasnet_exit(exit_code);
 }
 
@@ -722,3 +731,4 @@ void caf_form_team(gex_TM_t current_team, gex_TM_t* new_team, int64_t team_numbe
   gex_TM_Split(new_team, current_team, team_number, new_index, NULL, 0, GEX_FLAG_TM_NO_SCRATCH);
 }
 
+#endif // !CAF_RUNTIME_MPI

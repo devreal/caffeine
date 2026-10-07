@@ -113,7 +113,7 @@ contains
 
     call flush_all()
 
-    call caf_decaffeinate(1_c_int) ! does not return
+    call caf_abort(1_c_int) ! does not return
   end subroutine
 
   subroutine prif_error_stop_integer(quiet, stop_code)
@@ -136,7 +136,7 @@ contains
 
     call flush_all()
 
-    call caf_decaffeinate(exit_code) ! does not return
+    call caf_abort(exit_code) ! does not return
   end subroutine
 
   module procedure prif_fail_image
