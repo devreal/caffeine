@@ -272,11 +272,13 @@ void caf_form_team(caf_team_t current_team, caf_team_t* new_team, int64_t team_n
 static void reduce_trampoline(void *invec, void *inoutvec, int *len, MPI_Datatype *dt);
 
 static bool caf_finalized = false;
+static void free_type_cache(void);
 
 // Release MPI resources held by Caffeine and finalize MPI if we initialized it
 static void caf_finalize(void) {
   if (caf_finalized) return;
   caf_finalized = true;
+  free_type_cache();
   MPI_Win_unlock_all(seg_win);
   if (caf_initialized_mpi) MPI_Finalize();
 }
@@ -765,15 +767,11 @@ static void strided_copy(int dims, byte *dst, const ptrdiff_t *dst_stride,
   }
 }
 
-// Build a datatype describing a dims-dimensional strided region of
+// Build a committed datatype describing a dims-dimensional strided region of
 // element_size-byte contiguous blocks. Dimension 0 varies fastest.
-// Returns false if the region is empty.
-// *lo and *hi receive the lowest and one-past-highest byte offsets touched.
-static bool make_strided_type(int dims, const ptrdiff_t *stride, const size_t *extent,
-                              size_t element_size, MPI_Datatype *type,
-                              ptrdiff_t *lo, ptrdiff_t *hi) {
+static MPI_Datatype build_strided_type(int dims, const ptrdiff_t *stride, const size_t *extent,
+                                       size_t element_size) {
   if (element_size > INT_MAX) caf_fatal("strided element_size %zu too large", element_size);
-  if (!strided_bounds(dims, stride, extent, element_size, lo, hi)) return false;
   for (int d = 0; d < dims; d++) {
     if (extent[d] > INT_MAX) caf_fatal("strided extent %zu too large", extent[d]);
   }
@@ -785,8 +783,84 @@ static bool make_strided_type(int dims, const ptrdiff_t *stride, const size_t *e
     t = nt;
   }
   MPI_SAFE(MPI_Type_commit(&t));
-  *type = t;
-  return true;
+  return t;
+}
+
+// Cache of strided datatypes. Applications typically repeat transfers of the
+// same shape, so committed datatypes are kept in a direct-mapped cache keyed by
+// the full shape. Evicted types may be freed while still in use by incomplete
+// operations, which MPI permits.
+#ifndef CAF_TYPE_CACHE_SIZE
+#define CAF_TYPE_CACHE_SIZE 256 // must be a power of two
+#endif
+#define CAF_TYPE_CACHE_MAX_DIMS 16
+
+typedef struct {
+  bool used;
+  int dims;
+  size_t element_size;
+  size_t extent[CAF_TYPE_CACHE_MAX_DIMS];
+  ptrdiff_t stride[CAF_TYPE_CACHE_MAX_DIMS];
+  MPI_Datatype type;
+} type_cache_entry;
+static type_cache_entry type_cache[CAF_TYPE_CACHE_SIZE];
+
+static inline uint64_t fnv1a(uint64_t h, const void *data, size_t len) {
+  const byte *p = data;
+  for (size_t i = 0; i < len; i++) { h ^= p[i]; h *= 0x100000001b3ULL; }
+  return h;
+}
+
+// Return the datatype for a strided region. Sets *cached to false if the
+// caller owns (and must free) the returned type. The cache entry holding the
+// type is returned in *entry; the entry `keep` (if not NULL) is never evicted,
+// so that a type obtained earlier for the same transfer remains valid.
+static MPI_Datatype get_strided_type(int dims, const ptrdiff_t *stride, const size_t *extent,
+                                     size_t element_size, const type_cache_entry *keep,
+                                     bool *cached, type_cache_entry **entry) {
+  *entry = NULL;
+  if (dims > CAF_TYPE_CACHE_MAX_DIMS) {
+    *cached = false;
+    return build_strided_type(dims, stride, extent, element_size);
+  }
+  uint64_t h = 0xcbf29ce484222325ULL;
+  h = fnv1a(h, &dims, sizeof(dims));
+  h = fnv1a(h, &element_size, sizeof(element_size));
+  h = fnv1a(h, extent, sizeof(*extent) * dims);
+  h = fnv1a(h, stride, sizeof(*stride) * dims);
+  type_cache_entry *e = &type_cache[h & (CAF_TYPE_CACHE_SIZE - 1)];
+
+  if (e->used && e->dims == dims && e->element_size == element_size &&
+      !memcmp(e->extent, extent, sizeof(*extent) * dims) &&
+      !memcmp(e->stride, stride, sizeof(*stride) * dims)) {
+    *cached = true;
+    *entry = e;
+    return e->type;
+  }
+  if (e == keep) { // slot conflict within one transfer: do not evict
+    *cached = false;
+    return build_strided_type(dims, stride, extent, element_size);
+  }
+
+  if (e->used) MPI_SAFE(MPI_Type_free(&e->type));
+  *cached = true;
+  *entry = e;
+  e->type = build_strided_type(dims, stride, extent, element_size);
+  e->used = true;
+  e->dims = dims;
+  e->element_size = element_size;
+  memcpy(e->extent, extent, sizeof(*extent) * dims);
+  memcpy(e->stride, stride, sizeof(*stride) * dims);
+  return e->type;
+}
+
+static void free_type_cache(void) {
+  for (int i = 0; i < CAF_TYPE_CACHE_SIZE; i++) {
+    if (type_cache[i].used) {
+      MPI_Type_free(&type_cache[i].type);
+      type_cache[i].used = false;
+    }
+  }
 }
 
 static void strided_rma(bool is_put, int dims, int image_num,
@@ -807,11 +881,13 @@ static void strided_rma(bool is_put, int dims, int image_num,
     return;
   }
 
-  MPI_Datatype rtype, ltype;
-  ptrdiff_t rlo, rhi, llo, lhi;
-  if (!make_strided_type(dims, remote_stride, extent, element_size, &rtype, &rlo, &rhi))
+  ptrdiff_t rlo, rhi;
+  if (!strided_bounds(dims, remote_stride, extent, element_size, &rlo, &rhi))
     return; // empty transfer
-  make_strided_type(dims, current_image_stride, extent, element_size, &ltype, &llo, &lhi);
+  bool rcached, lcached;
+  type_cache_entry *rentry, *lentry;
+  MPI_Datatype rtype = get_strided_type(dims, remote_stride, extent, element_size, NULL, &rcached, &rentry);
+  MPI_Datatype ltype = get_strided_type(dims, current_image_stride, extent, element_size, rentry, &lcached, &lentry);
 
   // validate the full extent of the remote region, then use the region start as displacement
   (void)to_disp(rank, remote_ptr + rlo, (size_t)(rhi - rlo));
@@ -829,8 +905,8 @@ static void strided_rma(bool is_put, int dims, int image_num,
     MPI_SAFE(MPI_Get(current_image_buffer, 1, ltype, rank, disp, 1, rtype, seg_win));
     MPI_SAFE(MPI_Win_flush_local(rank, seg_win));
   }
-  MPI_SAFE(MPI_Type_free(&rtype));
-  MPI_SAFE(MPI_Type_free(&ltype));
+  if (!rcached) MPI_SAFE(MPI_Type_free(&rtype));
+  if (!lcached) MPI_SAFE(MPI_Type_free(&ltype));
 }
 
 void caf_put_strided(int dims, int image_num,

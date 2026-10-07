@@ -160,6 +160,8 @@ Implementation notes for the MPI runtime (`src/caffeine/caffeine_mpi.c`):
   * Image control statements complete all outstanding puts.
   * Building with `CFLAGS=-DCAF_DEBUG_DEFER_PUTS=1` emulates the weakest completion order MPI
     permits, for testing this logic.
+* **Strided transfers** use MPI derived datatypes, cached by shape so that repeated transfers
+  of the same shape skip datatype creation.
 * **Shared-memory mode.** When all images run on a single node, the heap window is created with
   `MPI_Win_allocate_shared` and each image maps every other image's segment.
   * Coarray accesses become direct memory copies.
